@@ -256,3 +256,38 @@ export function parseGraph(input: unknown): ParseResult {
   if (errors.length > 0) return { ok: false, errors };
   return { ok: true, graph: { nodes, switches, entry, target, conditions, edges } };
 }
+
+/**
+ * 把图序列化回导入格式的 JSON 文本（parseGraph(graphToJson(g)) 还原原图）。
+ * 用于“应用单边重定向”后同步导入框内容。
+ */
+export function graphToJson(g: FocusGraph): string {
+  const conditions: Record<string, Array<[string, boolean]>> = {};
+  g.conditions.forEach((lits, i) => {
+    if (lits.length > 0) {
+      conditions[g.nodes[i]] = lits.map((l) => [g.switches[l.sw], l.value]);
+    }
+  });
+  const edges: Record<string, Record<string, unknown>> = {};
+  g.edges.forEach((ne, i) => {
+    const spec: Record<string, unknown> = {};
+    if (ne.tab) spec.tab = g.nodes[ne.tab.to];
+    if (ne.shiftTab) spec.shiftTab = g.nodes[ne.shiftTab.to];
+    if (ne.activate) {
+      spec.activate =
+        ne.activate.flip === null
+          ? g.nodes[ne.activate.to]
+          : { to: g.nodes[ne.activate.to], flip: g.switches[ne.activate.flip] };
+    }
+    if (Object.keys(spec).length > 0) edges[g.nodes[i]] = spec;
+  });
+  const out: Record<string, unknown> = {
+    nodes: g.nodes,
+    switches: g.switches,
+    entry: g.nodes[g.entry],
+    target: g.nodes[g.target],
+  };
+  if (Object.keys(conditions).length > 0) out.conditions = conditions;
+  if (Object.keys(edges).length > 0) out.edges = edges;
+  return JSON.stringify(out, null, 2) + '\n';
+}

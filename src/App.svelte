@@ -1,11 +1,19 @@
 <script lang="ts">
   import {
     ACTION_ORDER,
+    graphToJson,
     parseGraph,
     visible,
     type ActionKind,
     type FocusGraph,
   } from './lib/model';
+  import {
+    applyRedirect,
+    previewRedirect,
+    REDIRECT_MAX_NODES,
+    REDIRECT_MAX_SWITCHES,
+    type RedirectPreview,
+  } from './lib/redirect';
   import {
     bitsOf,
     isDeadEdge,
@@ -42,6 +50,9 @@
   let trap: Witness | null = null;
   let trapSearched = false;
 
+  // ---- 单边重定向预览 ----
+  let preview: RedirectPreview | null = null;
+
   // ---- 回放 ----
   let activeSeq: 'witness' | 'trap' = 'witness';
   let step = 0;
@@ -51,6 +62,7 @@
     witnessSearched = false;
     trap = null;
     trapSearched = false;
+    preview = null;
     activeSeq = 'witness';
     step = 0;
   }
@@ -85,7 +97,28 @@
     step = 0;
   }
 
+  // 预览只读计算：不触碰当前图、见证与回放进度
+  function runPreview() {
+    if (!graph) return;
+    preview = previewRedirect(graph);
+  }
+
+  // 用户确认后才替换图并清空旧见证
+  function applyPreview() {
+    if (!graph || !preview || preview.status !== 'FOUND') return;
+    const c = preview.candidate;
+    const g2 = applyRedirect(graph, c);
+    graph = g2;
+    importText = graphToJson(g2);
+    importErrors = [];
+    importNotice = `已应用重定向：${g2.nodes[c.from]} 的 ${ACTION_LABEL[c.action]} → ${g2.nodes[c.to]}`;
+    resetAnalysis();
+  }
+
   // ---- 派生状态 ----
+  $: previewTooLarge = graph
+    ? graph.nodes.length > REDIRECT_MAX_NODES || graph.switches.length > REDIRECT_MAX_SWITCHES
+    : false;
   $: seq = activeSeq === 'witness' ? witness : trap;
   $: maxStep = seq ? seq.actions.length : 0;
   $: curState = graph
@@ -423,9 +456,76 @@
       {/if}
     </section>
 
+    <section class="panel">
+      <h2>
+        4 · 单边重定向预览
+        <small>（限 ≤ {REDIRECT_MAX_NODES} 节点 / ≤ {REDIRECT_MAX_SWITCHES} 开关）</small>
+      </h2>
+      <p class="hint">
+        只改一条已定义 Tab / Shift+Tab / 激活动作的目标节点（翻转开关不变），
+        重新展开状态图，检查能否让所有入口可达状态重新通向目标。
+      </p>
+      {#if previewTooLarge}
+        <p class="warn">
+          当前图超过预览上限（{REDIRECT_MAX_NODES} 节点 / {REDIRECT_MAX_SWITCHES} 开关），无法预览。
+        </p>
+      {:else}
+        <div class="row">
+          <button on:click={runPreview}>预览单边重定向</button>
+          {#if preview}
+            <button class="mini" on:click={() => (preview = null)}>清除预览</button>
+          {/if}
+        </div>
+      {/if}
+      {#if preview}
+        {#if preview.status === 'TOO_LARGE'}
+          <p class="warn">图超过预览上限，无法预览。</p>
+        {:else if preview.status === 'ALREADY_SAFE'}
+          <p class="ok">✅ ALREADY_SAFE：原图已无陷阱，无需重定向。</p>
+        {:else if preview.status === 'NO_SINGLE_REDIRECT'}
+          <p class="warn">
+            ❌ NO_SINGLE_REDIRECT：不存在能让所有入口可达状态通向目标的单边重定向。
+          </p>
+        {:else if preview.status === 'FOUND'}
+          {@const c = preview.candidate}
+          {@const oldEdge = graph.edges[c.from][c.action]!}
+          <p class="ok">
+            ✅ 安全重定向：<code>{graph.nodes[c.from]}</code> 的 {ACTION_LABEL[c.action]}
+            目标 <code>{graph.nodes[oldEdge.to]}</code> → <code>{graph.nodes[c.to]}</code>
+            {#if oldEdge.flip !== null}（保留翻转 {graph.switches[oldEdge.flip]}）{/if}
+          </p>
+          <ul class="detail">
+            <li>
+              被消除的陷阱见证：
+              {#if preview.eliminatedTrap.actions.length === 0}
+                （空序列：入口状态本身即陷阱）
+              {:else}
+                {#each preview.eliminatedTrap.actions as a}<code>{ACTION_LABEL[a]}</code>{' '}{/each}
+              {/if}
+            </li>
+            <li>
+              修改前最短到达：
+              {#if preview.before}
+                {#each preview.before.actions as a}<code>{ACTION_LABEL[a]}</code>{' '}{/each}
+              {:else}
+                不可达（null）
+              {/if}
+            </li>
+            <li>
+              修改后最短到达：
+              {#each preview.after.actions as a}<code>{ACTION_LABEL[a]}</code>{' '}{/each}
+            </li>
+          </ul>
+          <div class="row">
+            <button on:click={applyPreview}>应用此重定向（替换当前图并清空旧见证）</button>
+          </div>
+        {/if}
+      {/if}
+    </section>
+
     {#if seq}
       <section class="panel">
-        <h2>4 · 逐键回放 <small>（{activeSeq === 'witness' ? '到目标见证' : '陷阱前缀'}）</small></h2>
+        <h2>5 · 逐键回放 <small>（{activeSeq === 'witness' ? '到目标见证' : '陷阱前缀'}）</small></h2>
         <div class="chips">
           {#each seq.actions as a, i}
             <span class="chip" class:done={i < step} class:now={i === step}>{ACTION_LABEL[a]}</span>
@@ -539,6 +639,14 @@
     font-size: 0.85rem;
     margin: 8px 0 0;
     padding-left: 20px;
+  }
+  .detail {
+    font-size: 0.88rem;
+    margin: 8px 0 0;
+    padding-left: 20px;
+  }
+  .detail li {
+    margin: 3px 0;
   }
   .muted {
     color: #94a3b8;
